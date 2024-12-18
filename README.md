@@ -8,7 +8,7 @@
     - `SM9`: 标识密码算法
 2. **中国密码国家标准和行业标准** `如下表`
 <body>
-<style>
+<!-- <style>
   /* 表格整体样式 */
   table {
     width: 100%;
@@ -34,7 +34,7 @@
     background-color: rgba(117,239,140,0.71);
     color: rgb(11,56,236);
   }
-</style>
+</style> -->
 <table class="xl65">
  <tbody>
   <tr > 
