@@ -1,0 +1,32 @@
+"""构建配置常量"""
+import os
+
+# 仓库根目录（脚本在 scripts/ 下，向上一级）
+REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+
+# PDF 分类目录映射：目录名 → (categorySlug, categoryLabel)
+CATEGORY_MAP = {
+    "GBT 密码国家标准":       ("gbt",            "国家标准"),
+    "GMT 密码行业标准（现行）": ("gmt",            "行业标准（现行）"),
+    "GMT 密码行业标准（废止）": ("gmt-deprecated", "行业标准（废止）"),
+    "公开文档":               ("public",          "公开文档"),
+    "英文标准":               ("english",         "英文标准"),
+}
+
+# 图像渲染参数
+IMAGE_PAGE_WIDTH   = 1280   # 阅读图宽度 px
+IMAGE_COVER_WIDTH  = 480    # 封面宽度 px
+IMAGE_FORMAT       = "webp"
+IMAGE_PAGE_QUALITY = 75
+IMAGE_COVER_QUALITY = 70
+
+# 输出目录（相对于 REPO_ROOT）
+OUTPUT_DIR = os.path.join(REPO_ROOT, "dist")
+DOCS_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "docs")
+DATA_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "data")
+
+# 增量构建 manifest 文件路径
+ASSET_MANIFEST_PATH = os.path.join(REPO_ROOT, "scripts", "asset-manifest.json")
+
+# docHash 长度（sha256 截取前 N 位）
+DOC_HASH_LENGTH = 8

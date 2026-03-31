@@ -14,3 +14,12 @@ _book
 *.epub
 *.mobi
 .idea
+
+# 构建产物
+dist/
+site/node_modules/
+
+# Python 构建缓存
+scripts/asset-manifest.json
+scripts/__pycache__/
+*.pyc
