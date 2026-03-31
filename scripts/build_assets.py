@@ -17,13 +17,15 @@ import time
 import unicodedata
 
 import fitz  # PyMuPDF
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import io
 
 from config import (
     REPO_ROOT, CATEGORY_MAP,
     IMAGE_PAGE_WIDTH, IMAGE_COVER_WIDTH, IMAGE_FORMAT,
     IMAGE_PAGE_QUALITY, IMAGE_COVER_QUALITY,
+    IMAGE_SHARPEN_RADIUS, IMAGE_SHARPEN_PERCENT, IMAGE_SHARPEN_THRESHOLD,
+    IMAGE_CONTRAST,
     OUTPUT_DIR, DOCS_OUTPUT_DIR, DATA_OUTPUT_DIR,
     ASSET_MANIFEST_PATH, DOC_HASH_LENGTH,
 )
@@ -57,7 +59,7 @@ def slugify(text: str) -> str:
 _STANDARD_CODE_RE = re.compile(
     r"^(?:\(.*?\))?\s*"                         # 可能的前缀如 "(瘦身前)"
     r"((?:GBT|GMT|GB\/T|GM\/T)\s*[\d]+(?:\.[\d]+)?(?:-[\d]{4})?)"  # 标准编号
-    r"\s+"
+    r"\s*"
     r"(.+?)\.pdf$",                             # 标题
     re.IGNORECASE,
 )
@@ -74,7 +76,7 @@ def parse_filename(filename: str, category_slug: str):
     m = _STANDARD_CODE_RE.match(filename)
     if m:
         raw_code = m.group(1).strip()
-        title = m.group(2).strip()
+        title = m.group(2).strip().lstrip("_-:： ").strip()
         # 规范化标准编号格式：GBT → GB/T, GMT → GM/T
         code = raw_code
         if code.upper().startswith("GBT") and "/" not in code[:4]:
@@ -100,9 +102,50 @@ def render_page_to_webp(page: fitz.Page, width: int, quality: int) -> bytes:
 
     # 通过 Pillow 转为 webp
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    img = img.filter(
+        ImageFilter.UnsharpMask(
+            radius=IMAGE_SHARPEN_RADIUS,
+            percent=IMAGE_SHARPEN_PERCENT,
+            threshold=IMAGE_SHARPEN_THRESHOLD,
+        )
+    )
+    img = ImageEnhance.Contrast(img).enhance(IMAGE_CONTRAST)
     buf = io.BytesIO()
     img.save(buf, format="WEBP", quality=quality, method=4)
     return buf.getvalue()
+
+
+def extract_pdf_text(path: str):
+    """提取 PDF 页数、全文文本和摘要。"""
+    doc = fitz.open(path)
+    try:
+        page_count = len(doc)
+        text_parts = []
+        for page in doc:
+            text = page.get_text().strip()
+            if text:
+                text_parts.append(text)
+    finally:
+        doc.close()
+
+    full_text = "\n".join(text_parts)
+    excerpt = full_text[:500].replace("\n", " ").strip() if full_text else ""
+    return page_count, full_text, excerpt
+
+
+def is_render_complete(doc_id: str, doc_hash: str, page_count: int) -> bool:
+    """检查当前 hash 对应的渲染目录是否完整，可用于断点恢复。"""
+    doc_dir = os.path.join(DOCS_OUTPUT_DIR, doc_id, doc_hash)
+    pages_dir = os.path.join(doc_dir, "pages")
+    cover_path = os.path.join(doc_dir, "cover.webp")
+    if not os.path.exists(cover_path) or not os.path.isdir(pages_dir):
+        return False
+
+    page_files = [
+        name for name in os.listdir(pages_dir)
+        if name.lower().endswith(".webp")
+    ]
+    return len(page_files) == page_count
 
 
 # ---------------------------------------------------------------------------
@@ -170,29 +213,30 @@ def process_pdf(info: dict, doc_hash: str):
     os.makedirs(pages_dir, exist_ok=True)
 
     doc = fitz.open(info["abs_path"])
-    page_count = len(doc)
-    text_parts = []
+    try:
+        page_count = len(doc)
+        text_parts = []
 
-    for i, page in enumerate(doc):
-        # 渲染阅读图
-        webp_data = render_page_to_webp(page, IMAGE_PAGE_WIDTH, IMAGE_PAGE_QUALITY)
-        page_path = os.path.join(pages_dir, f"{i + 1:04d}.webp")
-        with open(page_path, "wb") as f:
-            f.write(webp_data)
+        for i, page in enumerate(doc):
+            # 渲染阅读图
+            webp_data = render_page_to_webp(page, IMAGE_PAGE_WIDTH, IMAGE_PAGE_QUALITY)
+            page_path = os.path.join(pages_dir, f"{i + 1:04d}.webp")
+            with open(page_path, "wb") as f:
+                f.write(webp_data)
 
-        # 封面（第一页，较小尺寸）
-        if i == 0:
-            cover_data = render_page_to_webp(page, IMAGE_COVER_WIDTH, IMAGE_COVER_QUALITY)
-            cover_path = os.path.join(doc_dir, "cover.webp")
-            with open(cover_path, "wb") as f:
-                f.write(cover_data)
+            # 封面（第一页，较小尺寸）
+            if i == 0:
+                cover_data = render_page_to_webp(page, IMAGE_COVER_WIDTH, IMAGE_COVER_QUALITY)
+                cover_path = os.path.join(doc_dir, "cover.webp")
+                with open(cover_path, "wb") as f:
+                    f.write(cover_data)
 
-        # 提取文本
-        text = page.get_text().strip()
-        if text:
-            text_parts.append(text)
-
-    doc.close()
+            # 提取文本
+            text = page.get_text().strip()
+            if text:
+                text_parts.append(text)
+    finally:
+        doc.close()
 
     full_text = "\n".join(text_parts)
     # 截取摘要（前 500 字符）
@@ -273,30 +317,39 @@ def build(full_rebuild: bool = False):
     manifest_entries = []
     search_docs = []
     processed = 0
+    skipped_render = 0
+    errors = []
 
     for info in pdfs:
         doc_id = info["id"]
         doc_hash = info["doc_hash"]
 
-        if doc_id in to_process:
-            processed += 1
-            print(f"\n[{processed}/{len(to_process)}] {info['filename']}")
-            t0 = time.time()
-            page_count, full_text, excerpt = process_pdf(info, doc_hash)
-            elapsed = time.time() - t0
-            print(f"  → {page_count} 页, 耗时 {elapsed:.1f}s")
-        else:
-            # 未变更的文档，仍需读取页数和文本用于索引
-            doc = fitz.open(info["abs_path"])
-            page_count = len(doc)
-            text_parts = []
-            for page in doc:
-                text = page.get_text().strip()
-                if text:
-                    text_parts.append(text)
-            doc.close()
-            full_text = "\n".join(text_parts)
-            excerpt = full_text[:500].replace("\n", " ").strip() if full_text else ""
+        try:
+            page_count, full_text, excerpt = extract_pdf_text(info["abs_path"])
+
+            if doc_id in to_process:
+                if is_render_complete(doc_id, doc_hash, page_count):
+                    skipped_render += 1
+                    print(f"\n[SKIP] {info['filename']} 已存在完整渲染结果")
+                else:
+                    current_dir = os.path.join(DOCS_OUTPUT_DIR, doc_id, doc_hash)
+                    if os.path.exists(current_dir):
+                        shutil.rmtree(current_dir)
+
+                    processed += 1
+                    print(f"\n[{processed}/{len(to_process)}] {info['filename']}")
+                    t0 = time.time()
+                    page_count, full_text, excerpt = process_pdf(info, doc_hash)
+                    elapsed = time.time() - t0
+                    print(f"  → {page_count} 页, 耗时 {elapsed:.1f}s")
+        except Exception as exc:
+            errors.append({
+                "id": doc_id,
+                "path": info["rel_path"],
+                "error": str(exc),
+            })
+            print(f"\n[ERROR] {info['rel_path']}: {exc}")
+            continue
 
         # manifest 条目
         cover_url = f"/docs/{doc_id}/{doc_hash}/cover.webp"
@@ -333,18 +386,25 @@ def build(full_rebuild: bool = False):
     manifest_path = os.path.join(DATA_OUTPUT_DIR, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest_entries, f, ensure_ascii=False, indent=2)
-    print(f"\n✓ manifest.json: {len(manifest_entries)} 条记录")
+    print(f"\n[OK] manifest.json: {len(manifest_entries)} 条记录")
 
     # 10. 写入 search-index.json（前端 MiniSearch 直接消费的文档列表）
     search_path = os.path.join(DATA_OUTPUT_DIR, "search-index.json")
     with open(search_path, "w", encoding="utf-8") as f:
         json.dump(search_docs, f, ensure_ascii=False)
-    print(f"✓ search-index.json: {len(search_docs)} 条记录")
+    print(f"[OK] search-index.json: {len(search_docs)} 条记录")
 
     # 11. 保存 asset-manifest（sha256 映射）
     new_asset_manifest = {info["id"]: info["sha256"] for info in pdfs}
     save_asset_manifest(new_asset_manifest)
-    print(f"✓ asset-manifest.json 已保存")
+    print(f"[OK] asset-manifest.json 已保存")
+    if skipped_render:
+        print(f"[OK] 复用已有渲染结果: {skipped_render} 个")
+    if errors:
+        errors_path = os.path.join(DATA_OUTPUT_DIR, "build-errors.json")
+        with open(errors_path, "w", encoding="utf-8") as f:
+            json.dump(errors, f, ensure_ascii=False, indent=2)
+        print(f"[WARN] 构建中有 {len(errors)} 个文档失败，详见: {errors_path}")
 
     print(f"\n{'=' * 60}")
     print(f"构建完成！产物目录: {OUTPUT_DIR}")

@@ -18,12 +18,33 @@
 
       <div class="sort-bar">
         <span class="result-count">{{ filteredDocs.length }} 份文档</span>
-        <select v-model="sortBy" class="sort-select">
-          <option value="code">按编号排序</option>
-          <option value="year-desc">按年份（新→旧）</option>
-          <option value="year-asc">按年份（旧→新）</option>
-          <option value="pages">按页数排序</option>
-        </select>
+        <div class="toolbar-controls">
+          <div class="view-toggle" role="tablist" aria-label="文档视图模式">
+            <button
+              type="button"
+              :class="['view-toggle-btn', { active: viewMode === 'card' }]"
+              :aria-pressed="viewMode === 'card'"
+              @click="viewMode = 'card'"
+            >
+              卡片
+            </button>
+            <button
+              type="button"
+              :class="['view-toggle-btn', { active: viewMode === 'list' }]"
+              :aria-pressed="viewMode === 'list'"
+              @click="viewMode = 'list'"
+            >
+              列表
+            </button>
+          </div>
+
+          <select v-model="sortBy" class="sort-select">
+            <option value="code">按编号排序</option>
+            <option value="year-desc">按年份（新→旧）</option>
+            <option value="year-asc">按年份（旧→新）</option>
+            <option value="pages">按页数排序</option>
+          </select>
+        </div>
       </div>
 
       <div v-if="loading" class="status-msg">加载中…</div>
@@ -32,8 +53,16 @@
         没有找到匹配的文档
       </div>
 
-      <div class="card-grid" v-if="filteredDocs.length > 0">
+      <div v-if="filteredDocs.length > 0 && viewMode === 'card'" class="card-grid">
         <DocCard
+          v-for="doc in filteredDocs"
+          :key="doc.id"
+          :doc="doc"
+        />
+      </div>
+
+      <div v-else-if="filteredDocs.length > 0" class="list-view">
+        <DocListItem
           v-for="doc in filteredDocs"
           :key="doc.id"
           :doc="doc"
@@ -48,6 +77,7 @@ import { ref, computed, watch } from 'vue'
 import SearchBar from '../components/SearchBar.vue'
 import CategoryFilter from '../components/CategoryFilter.vue'
 import DocCard from '../components/DocCard.vue'
+import DocListItem from '../components/DocListItem.vue'
 import { useManifest } from '../composables/useManifest'
 import { useSearch } from '../composables/useSearch'
 import type { DocEntry } from '../types'
@@ -58,6 +88,7 @@ const { search, loadIndex } = useSearch()
 const query = ref('')
 const activeCategory = ref('all')
 const sortBy = ref('code')
+const viewMode = ref<'card' | 'list'>('card')
 
 // 全部文档（当前分类筛选后的）
 const allDocs = computed(() => manifest.value)
@@ -107,40 +138,72 @@ watch(query, (val) => {
 
 .hero {
   text-align: center;
-  padding: 60px 24px 40px;
+  padding: 40px 24px 24px;
   background: linear-gradient(180deg, #e8f4f0 0%, #f5f4ee 100%);
 }
 
 .hero h1 {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: 700;
   color: #2c3e2d;
   margin: 0 0 8px;
 }
 
 .subtitle {
-  font-size: 16px;
+  font-size: 15px;
   color: #777;
-  margin: 0 0 28px;
+  margin: 0 0 20px;
 }
 
 .main-content {
-  max-width: 1200px;
+  max-width: 1240px;
   margin: 0 auto;
-  padding: 24px 20px 60px;
+  padding: 20px 20px 48px;
 }
 
 .sort-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 20px 0 16px;
+  gap: 12px;
+  margin: 18px 0 14px;
   font-size: 14px;
   color: #888;
 }
 
+.toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.view-toggle {
+  display: inline-flex;
+  padding: 3px;
+  border: 1.5px solid #e0ddd5;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.view-toggle-btn {
+  border: none;
+  background: transparent;
+  color: #666;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.view-toggle-btn.active {
+  background: #4a7c6f;
+  color: #fff;
+}
+
 .sort-select {
-  padding: 4px 10px;
+  padding: 6px 10px;
   border: 1.5px solid #e0ddd5;
   border-radius: 6px;
   font-size: 13px;
@@ -156,8 +219,14 @@ watch(query, (val) => {
 
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(184px, 1fr));
+  gap: 14px;
+}
+
+.list-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .status-msg {
@@ -173,16 +242,46 @@ watch(query, (val) => {
 
 @media (max-width: 768px) {
   .hero {
-    padding: 40px 16px 28px;
+    padding: 28px 16px 20px;
   }
 
   .hero h1 {
-    font-size: 24px;
+    font-size: 22px;
+  }
+
+  .subtitle {
+    margin-bottom: 16px;
+  }
+
+  .main-content {
+    padding: 16px 14px 40px;
+  }
+
+  .sort-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-controls {
+    justify-content: space-between;
+    flex-wrap: wrap;
   }
 
   .card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 10px;
+  }
+
+  .view-toggle {
+    flex: 1;
+  }
+
+  .view-toggle-btn {
+    flex: 1;
+  }
+
+  .sort-select {
+    flex: 1;
   }
 }
 </style>

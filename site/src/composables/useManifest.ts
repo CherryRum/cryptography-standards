@@ -1,5 +1,6 @@
 import { ref, type Ref } from 'vue'
 import type { DocEntry } from '../types'
+import { fetchJsonArray } from './fetchJson'
 
 const manifest = ref<DocEntry[]>([])
 const loading = ref(false)
@@ -11,9 +12,7 @@ async function fetchManifest() {
   loading.value = true
   error.value = null
   try {
-    const resp = await fetch('/data/manifest.json')
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    manifest.value = await resp.json()
+    manifest.value = await fetchJsonArray<DocEntry>('/data/manifest.json')
     loaded.value = true
   } catch (e: any) {
     error.value = e.message || '加载失败'

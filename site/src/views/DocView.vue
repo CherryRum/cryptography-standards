@@ -15,14 +15,28 @@
     </header>
 
     <section class="doc-body">
-      <PageViewer
-        :pages-base-url="doc.pagesBaseUrl"
-        :page-count="doc.pageCount"
-      />
+      <aside class="doc-outline-placeholder" aria-label="文档导航预留区域">
+        <div class="placeholder-card">
+          <span class="placeholder-label">预留区域</span>
+          <h2>文档导航</h2>
+          <p>后续可在这里接入目录、章节锚点或文档导航能力。</p>
+        </div>
+      </aside>
+
+      <div class="doc-reader">
+        <PageViewer
+          :pages-base-url="doc.pagesBaseUrl"
+          :page-count="doc.pageCount"
+        />
+      </div>
     </section>
   </div>
 
   <div v-else-if="loading" class="status-msg">加载中…</div>
+  <div v-else-if="error" class="status-msg error">
+    <p>{{ error }}</p>
+    <router-link to="/">返回首页</router-link>
+  </div>
   <div v-else class="status-msg">
     <p>未找到该文档</p>
     <router-link to="/">返回首页</router-link>
@@ -35,7 +49,7 @@ import { useManifest } from '../composables/useManifest'
 import PageViewer from '../components/PageViewer.vue'
 
 const props = defineProps<{ id: string }>()
-const { manifest, loading } = useManifest()
+const { manifest, loading, error } = useManifest()
 
 const doc = computed(() =>
   manifest.value.find((d) => d.id === props.id)
@@ -44,7 +58,7 @@ const doc = computed(() =>
 
 <style scoped>
 .doc-view {
-  max-width: 960px;
+  max-width: 1440px;
   margin: 0 auto;
   padding: 24px 20px 80px;
 }
@@ -115,6 +129,50 @@ const doc = computed(() =>
 
 .doc-body {
   margin-top: 16px;
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+
+.doc-outline-placeholder {
+  position: sticky;
+  top: 24px;
+}
+
+.placeholder-card {
+  padding: 20px;
+  background: #f7f5ef;
+  border: 1px solid #e8e1d7;
+  border-radius: 16px;
+  color: #6a6a63;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+.placeholder-label {
+  display: inline-flex;
+  margin-bottom: 10px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #ebe4d8;
+  color: #7b6a4e;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+
+.placeholder-card h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  color: #3d4d40;
+}
+
+.placeholder-card p {
+  margin: 0;
+  line-height: 1.7;
+}
+
+.doc-reader {
+  min-width: 0;
 }
 
 .status-msg {
@@ -124,9 +182,24 @@ const doc = computed(() =>
   color: #999;
 }
 
+.status-msg.error {
+  color: #c44;
+}
+
 .status-msg a {
   color: #4a7c6f;
   text-decoration: none;
+}
+
+@media (max-width: 1024px) {
+  .doc-body {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .doc-outline-placeholder {
+    position: static;
+  }
 }
 
 @media (max-width: 768px) {

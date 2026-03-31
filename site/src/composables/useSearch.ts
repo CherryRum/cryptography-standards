@@ -1,6 +1,7 @@
 import { ref, readonly } from 'vue'
 import MiniSearch from 'minisearch'
 import type { SearchDoc, DocEntry } from '../types'
+import { fetchJsonArrayOrEmpty } from './fetchJson'
 
 const miniSearch = ref<MiniSearch<SearchDoc> | null>(null)
 const indexLoading = ref(false)
@@ -10,9 +11,11 @@ async function loadIndex() {
   if (indexLoaded.value || indexLoading.value) return
   indexLoading.value = true
   try {
-    const resp = await fetch('/data/search-index.json')
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const docs: SearchDoc[] = await resp.json()
+    const docs = await fetchJsonArrayOrEmpty<SearchDoc>('/data/search-index.json')
+    if (docs.length === 0) {
+      indexLoaded.value = true
+      return
+    }
 
     const ms = new MiniSearch<SearchDoc>({
       fields: ['standardCode', 'title', 'categoryLabel', 'year', 'textExcerpt', 'fulltext'],
@@ -23,8 +26,7 @@ async function loadIndex() {
         prefix: true,
       },
       tokenize: (text) => {
-        // 支持中文：按非中文字符分词 + 中文逐字/双字
-        const words = text.split(/[\s/\-_.，。、；：""''（）()[\]【】]+/).filter(Boolean)
+        const words = text.split(/[\s\/\-_.，。、；："'（）()[\]【】]+/).filter(Boolean)
         const cjk = text.match(/[\u4e00-\u9fff]{1,2}/g) || []
         return [...words, ...cjk]
       },
@@ -32,8 +34,6 @@ async function loadIndex() {
     ms.addAll(docs)
     miniSearch.value = ms
     indexLoaded.value = true
-  } catch (e) {
-    console.error('搜索索引加载失败', e)
   } finally {
     indexLoading.value = false
   }
