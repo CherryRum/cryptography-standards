@@ -27,7 +27,15 @@ from config import (
     IMAGE_SHARPEN_RADIUS, IMAGE_SHARPEN_PERCENT, IMAGE_SHARPEN_THRESHOLD,
     IMAGE_CONTRAST,
     OUTPUT_DIR, DOCS_OUTPUT_DIR, DATA_OUTPUT_DIR,
-    ASSET_MANIFEST_PATH, DOC_HASH_LENGTH,
+    ASSET_MANIFEST_PATH, DOC_HASH_LENGTH, RENDER_SIGNATURE,
+)
+from metadata_utils import (
+    build_remote_indexes,
+    extract_standard_code,
+    extract_year,
+    load_remote_metadata,
+    normalize_standard_code,
+    normalize_title,
 )
 
 # ---------------------------------------------------------------------------
@@ -41,6 +49,11 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def sha256_text(text: str) -> str:
+    """计算字符串 sha256。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def slugify(text: str) -> str:
@@ -57,14 +70,10 @@ def slugify(text: str) -> str:
 
 
 _STANDARD_CODE_RE = re.compile(
-    r"^(?:\(.*?\))?\s*"                         # 可能的前缀如 "(瘦身前)"
-    r"((?:GBT|GMT|GB\/T|GM\/T)\s*[\d]+(?:\.[\d]+)?(?:-[\d]{4})?)"  # 标准编号
-    r"\s*"
-    r"(.+?)\.pdf$",                             # 标题
+    r"(?:\(.*?\)\s*)?"
+    r"((?:GBT|GMT|GB\/T|GM\/T|GBZ|GMZ|GB\/Z|GM\/Z|GBY|GMY)[\s_]*[\d]+(?:\.[\d]+)?(?:-[\d]{4})?)",
     re.IGNORECASE,
 )
-
-_YEAR_RE = re.compile(r"-(\d{4})")
 
 
 def parse_filename(filename: str, category_slug: str):
@@ -73,23 +82,205 @@ def parse_filename(filename: str, category_slug: str):
 
     返回 (standardCode, title, year)
     """
-    m = _STANDARD_CODE_RE.match(filename)
+    stem = os.path.splitext(filename)[0].strip()
+    m = _STANDARD_CODE_RE.search(stem)
     if m:
         raw_code = m.group(1).strip()
-        title = m.group(2).strip().lstrip("_-:： ").strip()
-        # 规范化标准编号格式：GBT → GB/T, GMT → GM/T
-        code = raw_code
-        if code.upper().startswith("GBT") and "/" not in code[:4]:
-            code = "GB/T " + code[3:].lstrip()
-        elif code.upper().startswith("GMT") and "/" not in code[:4]:
-            code = "GM/T " + code[3:].lstrip()
-        year_m = _YEAR_RE.search(code)
-        year = year_m.group(1) if year_m else ""
+        title = stem[m.end():].strip().lstrip("_-:： ").strip() or stem
+        code = normalize_standard_code(raw_code) or extract_standard_code(stem)
+        year = extract_year(code)
         return code, title, year
 
     # 英文标准或无法解析的文件名
-    title = filename.rsplit(".pdf", 1)[0].strip()
+    title = stem
     return "", title, ""
+
+
+def apply_remote_metadata(info: dict, remote_record: dict, match_confidence: str, match_key: str):
+    info["standardCode"] = remote_record.get("standardCode") or info["standardCode"]
+    info["title"] = remote_record.get("title") or info["title"]
+    info["year"] = remote_record.get("year") or info["year"]
+    info["titleEn"] = remote_record.get("titleEn", "")
+    info["publishDate"] = remote_record.get("publishDate", "")
+    info["implementDate"] = remote_record.get("implementDate", "")
+    info["status"] = remote_record.get("status", "")
+    info["statusLabel"] = remote_record.get("statusLabel", "")
+    info["standardType"] = remote_record.get("standardType", "")
+    info["standardTypeLabel"] = remote_record.get("standardTypeLabel", "")
+    info["workingGroup"] = remote_record.get("workingGroup", "")
+    info["workingGroupLabel"] = remote_record.get("workingGroupLabel", "")
+    info["draftingOrg"] = remote_record.get("draftingOrg", "")
+    info["responsibleOrg"] = remote_record.get("responsibleOrg", "")
+    info["adoptionType"] = remote_record.get("adoptionType", "")
+    info["adoptionTypeLabel"] = remote_record.get("adoptionTypeLabel", "")
+    info["upgradedToNationalFlag"] = remote_record.get("upgradedToNationalFlag", "")
+    info["remotePdfPath"] = remote_record.get("remotePdfPath", "")
+    info["metadataSource"] = remote_record.get("remoteSource", "gmbz.org.cn")
+    info["matchConfidence"] = match_confidence
+    info["matchKey"] = match_key
+
+
+def enrich_with_remote_metadata(pdfs: list[dict]):
+    payload = load_remote_metadata()
+    if not payload:
+        for info in pdfs:
+            info.update({
+                "titleEn": "",
+                "publishDate": "",
+                "implementDate": "",
+                "status": "",
+                "statusLabel": "",
+                "standardType": "",
+                "standardTypeLabel": "",
+                "workingGroup": "",
+                "workingGroupLabel": "",
+                "draftingOrg": "",
+                "responsibleOrg": "",
+                "adoptionType": "",
+                "adoptionTypeLabel": "",
+                "upgradedToNationalFlag": "",
+                "remotePdfPath": "",
+                "metadataSource": "local",
+                "matchConfidence": "none",
+                "matchKey": "",
+            })
+        return {
+            "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "remoteAvailable": False,
+            "remoteSource": "gmbz.org.cn",
+            "summary": {
+                "totalDocs": len(pdfs),
+                "remoteRecords": 0,
+                "matched": 0,
+                "matchedByCode": 0,
+                "matchedByTitle": 0,
+                "ambiguousByCode": 0,
+                "ambiguousByTitle": 0,
+                "unmatched": len(pdfs),
+            },
+            "unmatched": [
+                {
+                    "id": info["id"],
+                    "relPath": info["rel_path"],
+                    "category": info["category"],
+                    "standardCode": info["standardCode"],
+                    "title": info["title"],
+                }
+                for info in pdfs
+            ],
+            "ambiguous": [],
+        }
+
+    records = payload.get("records", [])
+    code_index, title_index = build_remote_indexes(records)
+    matched_by_code = 0
+    matched_by_title = 0
+    ambiguous_by_code = 0
+    ambiguous_by_title = 0
+    unmatched = []
+    ambiguous = []
+
+    for info in pdfs:
+        info.update({
+            "titleEn": "",
+            "publishDate": "",
+            "implementDate": "",
+            "status": "",
+            "statusLabel": "",
+            "standardType": "",
+            "standardTypeLabel": "",
+            "workingGroup": "",
+            "workingGroupLabel": "",
+            "draftingOrg": "",
+            "responsibleOrg": "",
+            "adoptionType": "",
+            "adoptionTypeLabel": "",
+            "upgradedToNationalFlag": "",
+            "remotePdfPath": "",
+            "metadataSource": "local",
+            "matchConfidence": "none",
+            "matchKey": "",
+        })
+
+        normalized_code = normalize_standard_code(info.get("standardCode"))
+        normalized_title = normalize_title(info.get("title"))
+
+        if normalized_code and normalized_code in code_index:
+            matches = code_index[normalized_code]
+            if len(matches) == 1:
+                apply_remote_metadata(info, matches[0], "code", normalized_code)
+                matched_by_code += 1
+                continue
+
+            ambiguous_by_code += 1
+            ambiguous.append({
+                "id": info["id"],
+                "relPath": info["rel_path"],
+                "category": info["category"],
+                "matchConfidence": "ambiguous-code",
+                "matchKey": normalized_code,
+                "candidates": [
+                    {
+                        "standardCode": candidate.get("standardCode", ""),
+                        "title": candidate.get("title", ""),
+                        "statusLabel": candidate.get("statusLabel", ""),
+                    }
+                    for candidate in matches
+                ],
+            })
+            continue
+
+        if (not normalized_code) and normalized_title and normalized_title in title_index:
+            matches = title_index[normalized_title]
+            if len(matches) == 1:
+                apply_remote_metadata(info, matches[0], "title", normalized_title)
+                matched_by_title += 1
+                continue
+
+            ambiguous_by_title += 1
+            ambiguous.append({
+                "id": info["id"],
+                "relPath": info["rel_path"],
+                "category": info["category"],
+                "matchConfidence": "ambiguous-title",
+                "matchKey": normalized_title,
+                "candidates": [
+                    {
+                        "standardCode": candidate.get("standardCode", ""),
+                        "title": candidate.get("title", ""),
+                        "statusLabel": candidate.get("statusLabel", ""),
+                    }
+                    for candidate in matches
+                ],
+            })
+            continue
+
+        unmatched.append({
+            "id": info["id"],
+            "relPath": info["rel_path"],
+            "category": info["category"],
+            "standardCode": info["standardCode"],
+            "title": info["title"],
+        })
+
+    return {
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "remoteAvailable": True,
+        "remoteSource": payload.get("source", "gmbz.org.cn"),
+        "remoteFetchedAt": payload.get("fetchedAt", ""),
+        "summary": {
+            "totalDocs": len(pdfs),
+            "remoteRecords": len(records),
+            "matched": matched_by_code + matched_by_title,
+            "matchedByCode": matched_by_code,
+            "matchedByTitle": matched_by_title,
+            "ambiguousByCode": ambiguous_by_code,
+            "ambiguousByTitle": ambiguous_by_title,
+            "unmatched": len(unmatched),
+        },
+        "unmatched": unmatched,
+        "ambiguous": ambiguous,
+    }
 
 
 def render_page_to_webp(page: fitz.Page, width: int, quality: int) -> bytes:
@@ -191,8 +382,15 @@ def load_asset_manifest():
     """加载上一次的 asset-manifest.json"""
     if os.path.exists(ASSET_MANIFEST_PATH):
         with open(ASSET_MANIFEST_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+            raw = json.load(f)
+        if isinstance(raw, dict) and "docs" in raw:
+            return raw
+        if isinstance(raw, dict):
+            return {
+                "_meta": {"render_signature": ""},
+                "docs": raw,
+            }
+    return {"_meta": {"render_signature": ""}, "docs": {}}
 
 
 def save_asset_manifest(manifest: dict):
@@ -258,6 +456,19 @@ def build(full_rebuild: bool = False):
     pdfs = scan_pdfs()
     print(f"\n扫描到 {len(pdfs)} 个 PDF 文件")
 
+    metadata_match_report = enrich_with_remote_metadata(pdfs)
+    metadata_summary = metadata_match_report["summary"]
+    if metadata_match_report.get("remoteAvailable"):
+        print(
+            "\n远端元数据匹配: "
+            f"成功 {metadata_summary['matched']} "
+            f"(编号 {metadata_summary['matchedByCode']}, 标题 {metadata_summary['matchedByTitle']}), "
+            f"冲突 {metadata_summary['ambiguousByCode'] + metadata_summary['ambiguousByTitle']}, "
+            f"未匹配 {metadata_summary['unmatched']}"
+        )
+    else:
+        print("\n[WARN] 未找到远端元数据缓存，将仅使用本地文件名元数据")
+
     # 2. 计算哈希
     print("\n计算文件哈希...")
     current_hashes = {}
@@ -265,10 +476,15 @@ def build(full_rebuild: bool = False):
         h = sha256_file(info["abs_path"])
         current_hashes[info["id"]] = h
         info["sha256"] = h
-        info["doc_hash"] = h[:DOC_HASH_LENGTH]
+        info["doc_hash"] = sha256_text(f"{h}:{RENDER_SIGNATURE}")[:DOC_HASH_LENGTH]
 
     # 3. 加载旧 manifest
-    old_manifest = {} if full_rebuild else load_asset_manifest()
+    loaded_manifest = load_asset_manifest()
+    previous_render_signature = loaded_manifest.get("_meta", {}).get("render_signature", "")
+    render_signature_changed = previous_render_signature != RENDER_SIGNATURE
+    old_manifest = {"_meta": {"render_signature": RENDER_SIGNATURE}, "docs": {}}
+    if not full_rebuild and not render_signature_changed:
+        old_manifest = loaded_manifest
 
     # 4. 确定变更
     new_ids = set()
@@ -277,13 +493,14 @@ def build(full_rebuild: bool = False):
     unchanged_ids = set()
 
     current_id_set = {info["id"] for info in pdfs}
-    old_id_set = set(old_manifest.keys())
+    old_docs = old_manifest.get("docs", {})
+    old_id_set = set(old_docs.keys())
 
     for info in pdfs:
         doc_id = info["id"]
-        if doc_id not in old_manifest:
+        if doc_id not in old_docs:
             new_ids.add(doc_id)
-        elif old_manifest[doc_id] != info["sha256"]:
+        elif old_docs[doc_id] != info["sha256"]:
             changed_ids.add(doc_id)
         else:
             unchanged_ids.add(doc_id)
@@ -294,6 +511,10 @@ def build(full_rebuild: bool = False):
     print(f"\n新增: {len(new_ids)}, 变更: {len(changed_ids)}, "
           f"删除: {len(deleted_ids)}, 未变: {len(unchanged_ids)}")
     print(f"需处理: {len(to_process)} 个 PDF")
+    if full_rebuild:
+        print("模式: 全量重建（强制重新渲染）")
+    elif render_signature_changed:
+        print("检测到渲染参数变化，将重新渲染全部文档")
 
     # 5. 确保输出目录存在
     os.makedirs(DOCS_OUTPUT_DIR, exist_ok=True)
@@ -308,7 +529,7 @@ def build(full_rebuild: bool = False):
 
     # 7. 对于变更的文档，清理旧 hash 目录
     for info in pdfs:
-        if info["id"] in changed_ids:
+        if full_rebuild or render_signature_changed or info["id"] in changed_ids:
             doc_base = os.path.join(DOCS_OUTPUT_DIR, info["id"])
             if os.path.exists(doc_base):
                 shutil.rmtree(doc_base)
@@ -318,6 +539,7 @@ def build(full_rebuild: bool = False):
     search_docs = []
     processed = 0
     skipped_render = 0
+    recovered_render = 0
     errors = []
 
     for info in pdfs:
@@ -326,9 +548,11 @@ def build(full_rebuild: bool = False):
 
         try:
             page_count, full_text, excerpt = extract_pdf_text(info["abs_path"])
+            render_complete = is_render_complete(doc_id, doc_hash, page_count)
+            needs_render = full_rebuild or (doc_id in to_process) or (not render_complete)
 
-            if doc_id in to_process:
-                if is_render_complete(doc_id, doc_hash, page_count):
+            if needs_render:
+                if (not full_rebuild) and (doc_id in to_process) and render_complete:
                     skipped_render += 1
                     print(f"\n[SKIP] {info['filename']} 已存在完整渲染结果")
                 else:
@@ -337,7 +561,12 @@ def build(full_rebuild: bool = False):
                         shutil.rmtree(current_dir)
 
                     processed += 1
-                    print(f"\n[{processed}/{len(to_process)}] {info['filename']}")
+                    if (not full_rebuild) and (doc_id not in to_process) and (not render_complete):
+                        recovered_render += 1
+                        print(f"\n[RECOVER {recovered_render}] {info['filename']}")
+                    else:
+                        print(f"\n[{processed}] {info['filename']}")
+
                     t0 = time.time()
                     page_count, full_text, excerpt = process_pdf(info, doc_hash)
                     elapsed = time.time() - t0
@@ -362,6 +591,24 @@ def build(full_rebuild: bool = False):
             "category": info["category"],
             "categoryLabel": info["categoryLabel"],
             "year": info["year"],
+            "titleEn": info.get("titleEn", ""),
+            "publishDate": info.get("publishDate", ""),
+            "implementDate": info.get("implementDate", ""),
+            "status": info.get("status", ""),
+            "statusLabel": info.get("statusLabel", ""),
+            "standardType": info.get("standardType", ""),
+            "standardTypeLabel": info.get("standardTypeLabel", ""),
+            "workingGroup": info.get("workingGroup", ""),
+            "workingGroupLabel": info.get("workingGroupLabel", ""),
+            "draftingOrg": info.get("draftingOrg", ""),
+            "responsibleOrg": info.get("responsibleOrg", ""),
+            "adoptionType": info.get("adoptionType", ""),
+            "adoptionTypeLabel": info.get("adoptionTypeLabel", ""),
+            "upgradedToNationalFlag": info.get("upgradedToNationalFlag", ""),
+            "remotePdfPath": info.get("remotePdfPath", ""),
+            "metadataSource": info.get("metadataSource", "local"),
+            "matchConfidence": info.get("matchConfidence", "none"),
+            "matchKey": info.get("matchKey", ""),
             "pageCount": page_count,
             "coverUrl": cover_url,
             "pagesBaseUrl": pages_base,
@@ -377,6 +624,14 @@ def build(full_rebuild: bool = False):
             "category": info["category"],
             "categoryLabel": info["categoryLabel"],
             "year": info["year"],
+            "titleEn": info.get("titleEn", ""),
+            "publishDate": info.get("publishDate", ""),
+            "implementDate": info.get("implementDate", ""),
+            "statusLabel": info.get("statusLabel", ""),
+            "standardTypeLabel": info.get("standardTypeLabel", ""),
+            "workingGroupLabel": info.get("workingGroupLabel", ""),
+            "draftingOrg": info.get("draftingOrg", ""),
+            "responsibleOrg": info.get("responsibleOrg", ""),
             "textExcerpt": excerpt,
             "fulltext": full_text[:5000] if full_text else "",
         }
@@ -394,12 +649,22 @@ def build(full_rebuild: bool = False):
         json.dump(search_docs, f, ensure_ascii=False)
     print(f"[OK] search-index.json: {len(search_docs)} 条记录")
 
+    match_report_path = os.path.join(DATA_OUTPUT_DIR, "metadata-match-report.json")
+    with open(match_report_path, "w", encoding="utf-8") as f:
+        json.dump(metadata_match_report, f, ensure_ascii=False, indent=2)
+    print(f"[OK] metadata-match-report.json 已保存")
+
     # 11. 保存 asset-manifest（sha256 映射）
-    new_asset_manifest = {info["id"]: info["sha256"] for info in pdfs}
+    new_asset_manifest = {
+        "_meta": {"render_signature": RENDER_SIGNATURE},
+        "docs": {info["id"]: info["sha256"] for info in pdfs},
+    }
     save_asset_manifest(new_asset_manifest)
     print(f"[OK] asset-manifest.json 已保存")
     if skipped_render:
         print(f"[OK] 复用已有渲染结果: {skipped_render} 个")
+    if recovered_render:
+        print(f"[OK] 恢复缺失渲染结果: {recovered_render} 个")
     if errors:
         errors_path = os.path.join(DATA_OUTPUT_DIR, "build-errors.json")
         with open(errors_path, "w", encoding="utf-8") as f:

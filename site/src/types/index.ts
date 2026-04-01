@@ -5,6 +5,24 @@ export interface DocEntry {
   category: string
   categoryLabel: string
   year: string
+  titleEn: string
+  publishDate: string
+  implementDate: string
+  status: string
+  statusLabel: string
+  standardType: string
+  standardTypeLabel: string
+  workingGroup: string
+  workingGroupLabel: string
+  draftingOrg: string
+  responsibleOrg: string
+  adoptionType: string
+  adoptionTypeLabel: string
+  upgradedToNationalFlag: string
+  remotePdfPath: string
+  metadataSource: string
+  matchConfidence: string
+  matchKey: string
   pageCount: number
   coverUrl: string
   pagesBaseUrl: string
@@ -18,6 +36,14 @@ export interface SearchDoc {
   category: string
   categoryLabel: string
   year: string
+  titleEn: string
+  publishDate: string
+  implementDate: string
+  statusLabel: string
+  standardTypeLabel: string
+  workingGroupLabel: string
+  draftingOrg: string
+  responsibleOrg: string
   textExcerpt: string
   fulltext: string
 }

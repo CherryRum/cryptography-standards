@@ -23,6 +23,12 @@ IMAGE_SHARPEN_RADIUS = 0.8
 IMAGE_SHARPEN_PERCENT = 115
 IMAGE_SHARPEN_THRESHOLD = 2
 IMAGE_CONTRAST = 1.05
+RENDER_SIGNATURE = (
+    f"w{IMAGE_PAGE_WIDTH}-cw{IMAGE_COVER_WIDTH}-"
+    f"q{IMAGE_PAGE_QUALITY}-{IMAGE_COVER_QUALITY}-"
+    f"usm{IMAGE_SHARPEN_RADIUS}-{IMAGE_SHARPEN_PERCENT}-{IMAGE_SHARPEN_THRESHOLD}-"
+    f"ct{IMAGE_CONTRAST}"
+)
 
 # 输出目录（相对于 REPO_ROOT）
 OUTPUT_DIR = os.path.join(REPO_ROOT, "dist")
@@ -31,6 +37,9 @@ DATA_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "data")
 
 # 增量构建 manifest 文件路径
 ASSET_MANIFEST_PATH = os.path.join(REPO_ROOT, "scripts", "asset-manifest.json")
+REMOTE_METADATA_DIR = os.path.join(REPO_ROOT, "scripts", "remote-metadata")
+REMOTE_METADATA_RAW_PATH = os.path.join(REMOTE_METADATA_DIR, "gmbz-normsearch-raw.json")
+REMOTE_METADATA_NORMALIZED_PATH = os.path.join(REMOTE_METADATA_DIR, "gmbz-normsearch-normalized.json")
 
 # docHash 长度（sha256 截取前 N 位）
 DOC_HASH_LENGTH = 8

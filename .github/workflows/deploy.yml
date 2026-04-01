@@ -1,4 +1,4 @@
-name: Build & Deploy
+name: Deploy Standards Site
 
 on:
   push:
@@ -9,12 +9,19 @@ jobs:
   build-deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      DEPLOY_HOST: ${{ secrets.DOC_DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DOC_DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PATH: ${{ secrets.DOC_DEPLOY_PATH }}
+      DEPLOY_URL: https://bz.gmkit.cn
+      EDGEONE_TARGETS_CN: ${{ vars.EDGEONE_TARGETS_CN }}
+      EDGEONE_TARGETS_GLOBAL: ${{ vars.EDGEONE_TARGETS_GLOBAL }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---- Python: 生成图片与索引 ----
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -25,27 +32,24 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r scripts/requirements.txt
 
-      - name: Download previous asset-manifest (incremental build)
-        continue-on-error: true
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust deploy host
         run: |
           mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p ${DEPLOY_PORT:-22} "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          scp -P ${DEPLOY_PORT:-22} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/asset-manifest.json" \
-            scripts/asset-manifest.json || echo "No previous manifest found, full build."
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Build assets (PDF → WebP + manifest + search index)
+      - name: Prepare remote directory
+        run: |
+          ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "mkdir -p '${DEPLOY_PATH}'"
+
+      - name: Build assets
         run: python scripts/build_assets.py
 
-      # ---- Node: 构建前端 ----
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -59,25 +63,60 @@ jobs:
       - name: Build Vite site
         run: cd site && npm run build
 
-      # ---- 部署到服务器 ----
-      - name: Deploy via rsync
+      - name: Deploy dist to Nginx directory
+        uses: burnett01/rsync-deployments@7.1.0
+        with:
+          switches: -az --delete
+          path: dist/
+          remote_path: ${{ secrets.DOC_DEPLOY_PATH }}/
+          remote_host: ${{ secrets.DOC_DEPLOY_HOST }}
+          remote_user: ${{ secrets.DEPLOY_USER }}
+          remote_port: ${{ secrets.DOC_DEPLOY_PORT }}
+          remote_key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Purge EdgeOne CDN Cache (Domestic - CN)
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MIN_INTERVAL_HOURS: 1
+          TENCENT_SECRET_ID_CN: ${{ secrets.TENCENT_SECRET_ID_CN }}
+          TENCENT_SECRET_KEY_CN: ${{ secrets.TENCENT_SECRET_KEY_CN }}
+          EDGEONE_ZONE_ID_CN: ${{ secrets.EDGEONE_ZONE_ID_CN }}
         run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p ${DEPLOY_PORT:-22} "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          if [ -z "$TENCENT_SECRET_ID_CN" ] || [ -z "$TENCENT_SECRET_KEY_CN" ] || [ -z "$EDGEONE_ZONE_ID_CN" ]; then
+            echo "Skip CN purge: missing required EdgeOne CN secrets"
+            exit 0
+          fi
 
-          rsync -avz --delete \
-            -e "ssh -p ${DEPLOY_PORT:-22} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
-            dist/ "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
+          CN_TARGETS="${EDGEONE_TARGETS_CN:-bz.gmkit.cn}"
+          python scripts/purge_edgeone.py \
+            "$TENCENT_SECRET_ID_CN" \
+            "$TENCENT_SECRET_KEY_CN" \
+            "$EDGEONE_ZONE_ID_CN" \
+            "$CN_TARGETS" \
+            --site-type=cn
 
-          # 回传 asset-manifest 供下次增量构建
-          scp -P ${DEPLOY_PORT:-22} -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
-            scripts/asset-manifest.json \
-            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/asset-manifest.json"
+      - name: Purge EdgeOne CDN Cache (International - Global)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MIN_INTERVAL_HOURS: 1
+          TENCENT_SECRET_ID_GLOBAL: ${{ secrets.TENCENT_SECRET_ID_GLOBAL }}
+          TENCENT_SECRET_KEY_GLOBAL: ${{ secrets.TENCENT_SECRET_KEY_GLOBAL }}
+          EDGEONE_ZONE_ID_GLOBAL: ${{ secrets.EDGEONE_ZONE_ID_GLOBAL }}
+        run: |
+          if [ -z "$TENCENT_SECRET_ID_GLOBAL" ] || [ -z "$TENCENT_SECRET_KEY_GLOBAL" ] || [ -z "$EDGEONE_ZONE_ID_GLOBAL" ]; then
+            echo "Skip Global purge: missing required EdgeOne Global secrets"
+            exit 0
+          fi
+
+          GLOBAL_TARGETS="${EDGEONE_TARGETS_GLOBAL:-bz.gmkit.cn}"
+          python scripts/purge_edgeone.py \
+            "$TENCENT_SECRET_ID_GLOBAL" \
+            "$TENCENT_SECRET_KEY_GLOBAL" \
+            "$EDGEONE_ZONE_ID_GLOBAL" \
+            "$GLOBAL_TARGETS" \
+            --site-type=intl
+
+      - name: Deployment summary
+        run: |
+          echo "Deployed to ${DEPLOY_PATH}"
+          echo "Suggested site domain: ${DEPLOY_URL}"

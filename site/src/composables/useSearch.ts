@@ -18,7 +18,22 @@ async function loadIndex() {
     }
 
     const ms = new MiniSearch<SearchDoc>({
-      fields: ['standardCode', 'title', 'categoryLabel', 'year', 'textExcerpt', 'fulltext'],
+      fields: [
+        'standardCode',
+        'title',
+        'titleEn',
+        'categoryLabel',
+        'year',
+        'publishDate',
+        'implementDate',
+        'statusLabel',
+        'standardTypeLabel',
+        'workingGroupLabel',
+        'draftingOrg',
+        'responsibleOrg',
+        'textExcerpt',
+        'fulltext',
+      ],
       storeFields: ['id'],
       searchOptions: {
         boost: { standardCode: 3, title: 2 },
@@ -51,7 +66,13 @@ export function useSearch() {
       return manifest.filter(
         (d) =>
           d.title.toLowerCase().includes(q) ||
-          d.standardCode.toLowerCase().includes(q)
+          d.standardCode.toLowerCase().includes(q) ||
+          d.titleEn.toLowerCase().includes(q) ||
+          d.statusLabel.toLowerCase().includes(q) ||
+          d.standardTypeLabel.toLowerCase().includes(q) ||
+          d.workingGroupLabel.toLowerCase().includes(q) ||
+          d.draftingOrg.toLowerCase().includes(q) ||
+          d.responsibleOrg.toLowerCase().includes(q)
       )
     }
 

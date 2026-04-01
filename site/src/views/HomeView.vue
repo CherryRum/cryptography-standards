@@ -180,7 +180,7 @@ watch(query, (val) => {
 .view-toggle {
   display: inline-flex;
   padding: 3px;
-  border: 1.5px solid #e0ddd5;
+  border: 2px solid #e0ddd5;
   border-radius: 8px;
   background: #fff;
 }
@@ -204,7 +204,7 @@ watch(query, (val) => {
 
 .sort-select {
   padding: 6px 10px;
-  border: 1.5px solid #e0ddd5;
+  border: 2px solid #e0ddd5;
   border-radius: 6px;
   font-size: 13px;
   color: #555;

@@ -20,6 +20,6 @@ dist/
 site/node_modules/
 
 # Python 构建缓存
-scripts/asset-manifest.json
+scripts/remote-metadata/gmbz-normsearch-raw.json
 scripts/__pycache__/
 *.pyc

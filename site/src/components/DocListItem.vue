@@ -8,15 +8,19 @@
     <dl class="meta-grid">
       <div class="meta-item">
         <dt>分类</dt>
-        <dd>{{ doc.categoryLabel }}</dd>
+        <dd :class="{ 'meta-value-placeholder': !doc.categoryLabel }">
+          {{ doc.categoryLabel || '未分类' }}
+        </dd>
       </div>
       <div class="meta-item">
         <dt>年份</dt>
-        <dd>{{ doc.year || '—' }}</dd>
+        <dd :class="{ 'meta-value-placeholder': !doc.year }">{{ doc.year || '—' }}</dd>
       </div>
       <div class="meta-item">
         <dt>页数</dt>
-        <dd>{{ doc.pageCount ? `${doc.pageCount} 页` : '—' }}</dd>
+        <dd :class="{ 'meta-value-placeholder': !doc.pageCount }">
+          {{ doc.pageCount ? `${doc.pageCount} 页` : '—' }}
+        </dd>
       </div>
     </dl>
   </router-link>
@@ -77,21 +81,33 @@ defineProps<{ doc: DocEntry }>()
 
 .meta-item {
   min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #ece7de;
+  border-radius: 8px;
+  background: #faf8f2;
 }
 
 .meta-item dt {
-  margin-bottom: 4px;
-  font-size: 11px;
-  color: #8a8a83;
+  margin-bottom: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #8b887f;
 }
 
 .meta-item dd {
   margin: 0;
   font-size: 13px;
-  color: #4f4f4a;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #4d524a;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.meta-value-placeholder {
+  color: #8b887f;
 }
 
 @media (max-width: 768px) {
@@ -120,6 +136,7 @@ defineProps<{ doc: DocEntry }>()
   .meta-item {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: 12px;
   }
 

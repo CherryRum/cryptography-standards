@@ -6,11 +6,38 @@
         <span v-if="doc.standardCode" class="code-badge">{{ doc.standardCode }}</span>
         <span class="category-tag">{{ doc.categoryLabel }}</span>
         <span v-if="doc.year" class="year-tag">{{ doc.year }} 年</span>
+        <span v-if="doc.statusLabel" class="status-tag">{{ doc.statusLabel }}</span>
       </div>
       <h1 class="doc-title">{{ doc.title }}</h1>
       <div class="doc-info">
         <span>共 {{ doc.pageCount }} 页</span>
         <span>更新于 {{ doc.updatedAt }}</span>
+      </div>
+      <div v-if="hasExtendedMeta" class="doc-details">
+        <div class="detail-item">
+          <span class="detail-label">发布日期</span>
+          <strong class="detail-value">{{ displayMeta(doc.publishDate) }}</strong>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">实施日期</span>
+          <strong class="detail-value">{{ displayMeta(doc.implementDate) }}</strong>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">标准属性</span>
+          <strong class="detail-value">{{ displayMeta(doc.standardTypeLabel) }}</strong>
+        </div>
+        <div class="detail-item">
+          <span class="detail-label">工作组</span>
+          <strong class="detail-value">{{ displayMeta(doc.workingGroupLabel) }}</strong>
+        </div>
+        <div class="detail-item detail-item-wide">
+          <span class="detail-label">起草单位</span>
+          <strong class="detail-value">{{ displayMeta(doc.draftingOrg) }}</strong>
+        </div>
+        <div class="detail-item detail-item-wide">
+          <span class="detail-label">负责单位</span>
+          <strong class="detail-value">{{ displayMeta(doc.responsibleOrg) }}</strong>
+        </div>
       </div>
     </header>
 
@@ -54,6 +81,23 @@ const { manifest, loading, error } = useManifest()
 const doc = computed(() =>
   manifest.value.find((d) => d.id === props.id)
 )
+
+const hasExtendedMeta = computed(() => {
+  if (!doc.value) return false
+  return [
+    doc.value.publishDate,
+    doc.value.implementDate,
+    doc.value.statusLabel,
+    doc.value.standardTypeLabel,
+    doc.value.workingGroupLabel,
+    doc.value.draftingOrg,
+    doc.value.responsibleOrg,
+  ].some(Boolean)
+})
+
+function displayMeta(value: string) {
+  return value || '—'
+}
 </script>
 
 <style scoped>
@@ -112,6 +156,15 @@ const doc = computed(() =>
   color: #888;
 }
 
+.status-tag {
+  font-size: 12px;
+  font-weight: 600;
+  color: #866300;
+  background: #fff5d8;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
 .doc-title {
   font-size: 24px;
   font-weight: 600;
@@ -125,6 +178,42 @@ const doc = computed(() =>
   gap: 16px;
   font-size: 14px;
   color: #999;
+}
+
+.doc-details {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid #ebe5da;
+  border-radius: 10px;
+  background: #faf8f2;
+}
+
+.detail-item-wide {
+  grid-column: span 2;
+}
+
+.detail-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #8b887f;
+}
+
+.detail-value {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #39453b;
+  word-break: break-word;
 }
 
 .doc-body {
@@ -192,6 +281,10 @@ const doc = computed(() =>
 }
 
 @media (max-width: 1024px) {
+  .doc-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .doc-body {
     grid-template-columns: 1fr;
     gap: 20px;
@@ -209,6 +302,14 @@ const doc = computed(() =>
 
   .doc-title {
     font-size: 20px;
+  }
+
+  .doc-details {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-item-wide {
+    grid-column: auto;
   }
 }
 </style>

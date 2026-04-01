@@ -12,9 +12,18 @@
       <span v-if="doc.standardCode" class="code-badge">{{ doc.standardCode }}</span>
       <h3 class="card-title">{{ doc.title }}</h3>
       <div class="card-meta">
-        <span class="category-tag">{{ doc.categoryLabel }}</span>
-        <span v-if="doc.year" class="year-tag">{{ doc.year }}</span>
-        <span v-if="doc.pageCount" class="page-count">{{ doc.pageCount }} 页</span>
+        <span
+          class="meta-pill meta-pill-category"
+          :class="{ 'meta-pill-placeholder': !doc.categoryLabel }"
+        >
+          {{ doc.categoryLabel || '未分类' }}
+        </span>
+        <span class="meta-pill" :class="{ 'meta-pill-placeholder': !doc.year }">
+          {{ doc.year || '年份 —' }}
+        </span>
+        <span class="meta-pill" :class="{ 'meta-pill-placeholder': !doc.pageCount }">
+          {{ doc.pageCount ? `${doc.pageCount} 页` : '页数 —' }}
+        </span>
       </div>
     </div>
   </router-link>
@@ -103,22 +112,34 @@ function onCoverError(e: Event) {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+}
+
+.meta-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid #e6e1d7;
+  border-radius: 999px;
+  background: #faf8f2;
   font-size: 11px;
-  color: #888;
+  font-weight: 600;
+  line-height: 1;
+  color: #6c6b65;
+  white-space: nowrap;
 }
 
-.category-tag {
-  background: #f5f4ee;
-  padding: 2px 6px;
-  border-radius: 3px;
+.meta-pill-placeholder {
+  color: #9b978e;
+  background: #fbf9f4;
+  border-style: dashed;
 }
 
-.year-tag {
-  color: #7f7f78;
-}
-
-.page-count {
-  opacity: 0.7;
+.meta-pill-category {
+  border-color: #d9e6e0;
+  background: #eef6f2;
+  color: #446d61;
 }
 </style>
