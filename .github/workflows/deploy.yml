@@ -64,15 +64,11 @@ jobs:
         run: cd site && npm run build
 
       - name: Deploy dist to Nginx directory
-        uses: burnett01/rsync-deployments@7.1.0
-        with:
-          switches: -az --delete
-          path: dist/
-          remote_path: ${{ secrets.DOC_DEPLOY_PATH }}/
-          remote_host: ${{ secrets.DOC_DEPLOY_HOST }}
-          remote_user: ${{ secrets.DEPLOY_USER }}
-          remote_port: ${{ secrets.DOC_DEPLOY_PORT }}
-          remote_key: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          rsync -az --delete \
+            -e "ssh -p ${DEPLOY_PORT:-22}" \
+            dist/ \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
 
       - name: Purge EdgeOne CDN Cache (Domestic - CN)
         env:
