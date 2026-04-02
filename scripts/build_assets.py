@@ -9,6 +9,7 @@
 import argparse
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -444,6 +445,26 @@ def process_pdf(info: dict, doc_hash: str):
 
 
 # ---------------------------------------------------------------------------
+# 并行渲染 worker
+# ---------------------------------------------------------------------------
+
+def _render_worker(task):
+    """多进程 worker：清理旧输出目录并渲染单个 PDF。"""
+    info, doc_hash = task
+    doc_id = info["id"]
+    current_dir = os.path.join(DOCS_OUTPUT_DIR, doc_id, doc_hash)
+    if os.path.exists(current_dir):
+        shutil.rmtree(current_dir)
+    try:
+        t0 = time.time()
+        page_count, full_text, excerpt = process_pdf(info, doc_hash)
+        elapsed = time.time() - t0
+        return doc_id, page_count, full_text, excerpt, elapsed, None
+    except Exception as exc:
+        return doc_id, 0, "", "", 0.0, str(exc)
+
+
+# ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
 
@@ -542,12 +563,18 @@ def build(full_rebuild: bool = False):
     recovered_render = 0
     errors = []
 
+    # Phase 1: 顺序提取文本 + 确定哪些需要渲染
+    render_queue = []       # [(info, doc_hash), ...]
+    text_cache = {}         # doc_id -> (page_count, full_text, excerpt)
+    error_ids = set()
+    info_by_id = {info["id"]: info for info in pdfs}
+
     for info in pdfs:
         doc_id = info["id"]
         doc_hash = info["doc_hash"]
-
         try:
             page_count, full_text, excerpt = extract_pdf_text(info["abs_path"])
+            text_cache[doc_id] = (page_count, full_text, excerpt)
             render_complete = is_render_complete(doc_id, doc_hash, page_count)
             needs_render = full_rebuild or (doc_id in to_process) or (not render_complete)
 
@@ -556,28 +583,45 @@ def build(full_rebuild: bool = False):
                     skipped_render += 1
                     print(f"\n[SKIP] {info['filename']} 已存在完整渲染结果")
                 else:
-                    current_dir = os.path.join(DOCS_OUTPUT_DIR, doc_id, doc_hash)
-                    if os.path.exists(current_dir):
-                        shutil.rmtree(current_dir)
-
-                    processed += 1
                     if (not full_rebuild) and (doc_id not in to_process) and (not render_complete):
                         recovered_render += 1
-                        print(f"\n[RECOVER {recovered_render}] {info['filename']}")
-                    else:
-                        print(f"\n[{processed}] {info['filename']}")
-
-                    t0 = time.time()
-                    page_count, full_text, excerpt = process_pdf(info, doc_hash)
-                    elapsed = time.time() - t0
-                    print(f"  → {page_count} 页, 耗时 {elapsed:.1f}s")
+                    render_queue.append((info, doc_hash))
         except Exception as exc:
-            errors.append({
-                "id": doc_id,
-                "path": info["rel_path"],
-                "error": str(exc),
-            })
+            error_ids.add(doc_id)
+            errors.append({"id": doc_id, "path": info["rel_path"], "error": str(exc)})
             print(f"\n[ERROR] {info['rel_path']}: {exc}")
+
+    # Phase 2: 并行渲染
+    render_results = {}  # doc_id -> (page_count, full_text, excerpt)
+    if render_queue:
+        n_workers = min(multiprocessing.cpu_count() or 1, len(render_queue))
+        print(f"\n开始并行渲染 {len(render_queue)} 个文档 (workers={n_workers})...")
+        with multiprocessing.Pool(processes=n_workers) as pool:
+            for i, result in enumerate(pool.imap_unordered(_render_worker, render_queue), 1):
+                doc_id, page_count, full_text, excerpt, elapsed, err = result
+                filename = info_by_id[doc_id]["filename"]
+                if err:
+                    error_ids.add(doc_id)
+                    errors.append({"id": doc_id, "path": info_by_id[doc_id]["rel_path"], "error": err})
+                    print(f"\n[ERROR] {filename}: {err}")
+                else:
+                    render_results[doc_id] = (page_count, full_text, excerpt)
+                    processed += 1
+                    print(f"\n[{i}/{len(render_queue)}] {filename}: {page_count} 页, 耗时 {elapsed:.1f}s")
+
+    # Phase 3: 构建 manifest 条目
+    for info in pdfs:
+        doc_id = info["id"]
+        doc_hash = info["doc_hash"]
+
+        if doc_id in error_ids:
+            continue
+
+        if doc_id in render_results:
+            page_count, full_text, excerpt = render_results[doc_id]
+        elif doc_id in text_cache:
+            page_count, full_text, excerpt = text_cache[doc_id]
+        else:
             continue
 
         # manifest 条目

@@ -22,15 +22,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: scripts/requirements.txt
-
-      - name: Install Python dependencies
-        run: pip install -r scripts/requirements.txt
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y rsync
 
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -46,6 +41,24 @@ jobs:
         run: |
           ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
             "mkdir -p '${DEPLOY_PATH}'"
+
+      - name: Rsync timestamp probe
+        run: |
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /tmp/deploy-probe.txt
+          rsync -az \
+            -e "ssh -p ${DEPLOY_PORT:-22}" \
+            /tmp/deploy-probe.txt \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/.deploy-probe"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
 
       - name: Build assets
         run: python scripts/build_assets.py
