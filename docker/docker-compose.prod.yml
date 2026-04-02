@@ -1,0 +1,7 @@
+services:
+  site:
+    image: ${IMAGE_REF}
+    container_name: ${CONTAINER_NAME}
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT}:${CONTAINER_PORT}"

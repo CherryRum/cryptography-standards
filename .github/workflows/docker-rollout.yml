@@ -1,0 +1,206 @@
+name: Deploy Docker Image
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: 要部署的镜像 tag
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 要部署的镜像 tag，例如 std_20260402135133
+        required: true
+        default: main-latest
+
+jobs:
+  rollout-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DEPLOY_IMAGE_TAG: ${{ inputs.image_tag || github.event.inputs.image_tag }}
+      TCR_REGISTRY: ${{ vars.TCR_REGISTRY }}
+      TCR_NAMESPACE: ${{ vars.TCR_NAMESPACE }}
+      IMAGE_NAME: ${{ vars.IMAGE_NAME }}
+      CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+      HOST_PORT: ${{ vars.HOST_PORT }}
+      CONTAINER_PORT: ${{ vars.CONTAINER_PORT }}
+      HEALTHCHECK_PATH: ${{ vars.HEALTHCHECK_PATH }}
+      DEPLOY_HOST: ${{ secrets.DOC_DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DOC_DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # 先校验部署参数，避免 ssh 上去后才发现缺变量。
+      - name: 校验部署配置
+        run: |
+          set -euo pipefail
+          missing=0
+
+          for name in TCR_REGISTRY TCR_NAMESPACE IMAGE_NAME CONTAINER_NAME TCR_USERNAME TCR_PASSWORD DEPLOY_HOST DEPLOY_USER SSH_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::缺少必需配置：${name}"
+              missing=1
+            else
+              echo "已找到配置：${name}"
+            fi
+          done
+
+          if [ -z "${HOST_PORT}" ]; then
+            echo "HOST_PORT 未设置，默认使用 8080"
+          fi
+
+          if [ -z "${CONTAINER_PORT}" ]; then
+            echo "CONTAINER_PORT 未设置，默认使用 80"
+          fi
+
+          if [ -z "${HEALTHCHECK_PATH}" ]; then
+            echo "HEALTHCHECK_PATH 未设置，默认使用 /"
+          fi
+
+          if [ ! -f "docker/docker-compose.prod.yml" ]; then
+            echo "::error::缺少 compose 模板文件：docker/docker-compose.prod.yml"
+            exit 1
+          fi
+
+          if [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi
+        env:
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # 注入 SSH 私钥，复用现有 SSH 部署方式。
+      - name: 配置 SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: 写入 known_hosts
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" "$DEPLOY_HOST" | tee -a ~/.ssh/known_hosts > /dev/null
+
+      # 服务器侧流程：
+      # 1. 登录镜像仓并拉取指定 tag
+      # 2. 上传 compose 模板与 .env
+      # 3. 执行 docker compose up -d 替换容器
+      # 4. 做健康检查
+      - name: 拉取镜像并用 compose 替换容器
+        run: |
+          set -euo pipefail
+
+          compose_file_b64="$(base64 -w 0 docker/docker-compose.prod.yml)"
+          tcr_registry_b64="$(printf '%s' "${TCR_REGISTRY}" | base64 -w 0)"
+          tcr_namespace_b64="$(printf '%s' "${TCR_NAMESPACE}" | base64 -w 0)"
+          image_name_b64="$(printf '%s' "${IMAGE_NAME}" | base64 -w 0)"
+          image_tag_b64="$(printf '%s' "${DEPLOY_IMAGE_TAG}" | base64 -w 0)"
+          tcr_username_b64="$(printf '%s' "${{ secrets.TCR_USERNAME }}" | base64 -w 0)"
+          tcr_password_b64="$(printf '%s' "${{ secrets.TCR_PASSWORD }}" | base64 -w 0)"
+          container_name_b64="$(printf '%s' "${CONTAINER_NAME}" | base64 -w 0)"
+          host_port_b64="$(printf '%s' "${HOST_PORT:-8080}" | base64 -w 0)"
+          container_port_b64="$(printf '%s' "${CONTAINER_PORT:-80}" | base64 -w 0)"
+          healthcheck_path_b64="$(printf '%s' "${HEALTHCHECK_PATH:-/}" | base64 -w 0)"
+
+          ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "COMPOSE_FILE_B64='${compose_file_b64}' \
+             TCR_REGISTRY_B64='${tcr_registry_b64}' \
+             TCR_NAMESPACE_B64='${tcr_namespace_b64}' \
+             IMAGE_NAME_B64='${image_name_b64}' \
+             IMAGE_TAG_B64='${image_tag_b64}' \
+             TCR_USERNAME_B64='${tcr_username_b64}' \
+             TCR_PASSWORD_B64='${tcr_password_b64}' \
+             CONTAINER_NAME_B64='${container_name_b64}' \
+             HOST_PORT_B64='${host_port_b64}' \
+             CONTAINER_PORT_B64='${container_port_b64}' \
+             HEALTHCHECK_PATH_B64='${healthcheck_path_b64}' \
+             bash -s" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          decode() {
+            printf '%s' "$1" | base64 -d
+          }
+
+          APP_ROOT="${HOME}/docker-apps"
+          TCR_REGISTRY="$(decode "${TCR_REGISTRY_B64}")"
+          TCR_NAMESPACE="$(decode "${TCR_NAMESPACE_B64}")"
+          IMAGE_NAME="$(decode "${IMAGE_NAME_B64}")"
+          IMAGE_TAG="$(decode "${IMAGE_TAG_B64}")"
+          TCR_USERNAME="$(decode "${TCR_USERNAME_B64}")"
+          TCR_PASSWORD="$(decode "${TCR_PASSWORD_B64}")"
+          CONTAINER_NAME="$(decode "${CONTAINER_NAME_B64}")"
+          HOST_PORT="$(decode "${HOST_PORT_B64}")"
+          CONTAINER_PORT="$(decode "${CONTAINER_PORT_B64}")"
+          HEALTHCHECK_PATH="$(decode "${HEALTHCHECK_PATH_B64}")"
+
+          IMAGE_REF="${TCR_REGISTRY}/${TCR_NAMESPACE}/${IMAGE_NAME}:${IMAGE_TAG}"
+          APP_PATH="${APP_ROOT}/${CONTAINER_NAME}"
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "ERROR: 服务器未安装 Docker"
+            exit 1
+          fi
+
+          if docker compose version >/dev/null 2>&1; then
+            COMPOSE_CMD='docker compose'
+          elif command -v docker-compose >/dev/null 2>&1; then
+            COMPOSE_CMD='docker-compose'
+          else
+            echo "ERROR: 服务器未安装 docker compose"
+            exit 1
+          fi
+
+          printf '%s' "${TCR_PASSWORD}" | docker login "${TCR_REGISTRY}" -u "${TCR_USERNAME}" --password-stdin
+          docker pull "${IMAGE_REF}"
+
+          mkdir -p "${APP_PATH}"
+          decode "${COMPOSE_FILE_B64}" > "${APP_PATH}/docker-compose.prod.yml"
+
+          cat > "${APP_PATH}/.env" <<EOF
+IMAGE_REF=${IMAGE_REF}
+CONTAINER_NAME=${CONTAINER_NAME}
+HOST_PORT=${HOST_PORT}
+CONTAINER_PORT=${CONTAINER_PORT}
+EOF
+
+          cd "${APP_PATH}"
+          ${COMPOSE_CMD} --env-file .env -f docker-compose.prod.yml up -d --remove-orphans
+
+          health_ok=0
+          for _ in $(seq 1 30); do
+            if command -v curl >/dev/null 2>&1; then
+              if curl -fsS "http://127.0.0.1:${HOST_PORT}${HEALTHCHECK_PATH}" >/dev/null; then
+                health_ok=1
+                break
+              fi
+            else
+              if wget -q -O - "http://127.0.0.1:${HOST_PORT}${HEALTHCHECK_PATH}" >/dev/null 2>&1; then
+                health_ok=1
+                break
+              fi
+            fi
+            sleep 2
+          done
+
+          if [ "${health_ok}" -ne 1 ]; then
+            echo "新容器健康检查失败。"
+            ${COMPOSE_CMD} -f docker-compose.prod.yml ps || true
+            docker logs --tail 100 "${CONTAINER_NAME}" || true
+            exit 1
+          fi
+
+          docker image prune -f >/dev/null 2>&1 || true
+          echo "发布成功，当前镜像：${IMAGE_REF}"
+          echo "compose 目录：${APP_PATH}"
+REMOTE_SCRIPT
+
+      - name: 部署总结
+        run: |
+          echo "已部署镜像 tag：${DEPLOY_IMAGE_TAG}"
+          echo "容器名称：${{ vars.CONTAINER_NAME }}"
