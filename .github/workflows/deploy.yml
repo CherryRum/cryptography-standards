@@ -1,8 +1,6 @@
 name: Deploy Standards Site
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -19,67 +17,160 @@ jobs:
       EDGEONE_TARGETS_GLOBAL: ${{ vars.EDGEONE_TARGETS_GLOBAL }}
 
     steps:
-      - name: Checkout
+      # 拉取仓库代码。
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      # 安装系统依赖：
+      # - rsync：部署与预检需要
+      # - netcat-openbsd：用于端口连通性检测
+      - name: 安装系统依赖
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y rsync
+          sudo apt-get install -y rsync netcat-openbsd
 
-      - name: Setup SSH agent
+      # 先校验部署相关 secrets，避免 Python/Node 都开始跑了才发现配置缺失。
+      - name: 校验部署配置
+        run: |
+          set -euo pipefail
+          missing=0
+
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH SSH_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::缺少必需配置：${name}"
+              missing=1
+            else
+              echo "已找到配置：${name}"
+            fi
+          done
+
+          if [ -n "${DEPLOY_PORT}" ]; then
+            echo "部署端口：${DEPLOY_PORT}"
+          else
+            echo "DEPLOY_PORT 为空，将默认使用 22"
+          fi
+
+          if [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # 将私钥注入 SSH agent，后续 ssh/rsync 均复用这把钥匙。
+      - name: 配置 SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Trust deploy host
+      # 确认密钥已被 agent 正确加载。
+      - name: 查看已加载的 SSH 密钥
         run: |
+          set -euo pipefail
+          ssh-add -l
+
+      # 先做网络层预检，区分“机器连不上”和“rsync 逻辑失败”。
+      - name: 检查主机解析与端口连通性
+        run: |
+          set -euo pipefail
+          echo "解析结果："
+          getent ahosts "$DEPLOY_HOST"
+          echo ""
+          echo "TCP 探测："
+          nc -vz "$DEPLOY_HOST" "${DEPLOY_PORT:-22}"
+
+      # 写入主机指纹，避免首次连接交互确认。
+      - name: 写入 known_hosts
+        run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          ssh-keyscan -p "${DEPLOY_PORT:-22}" "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" "$DEPLOY_HOST" | tee -a ~/.ssh/known_hosts > /dev/null
+          echo "已捕获的主机指纹："
+          ssh-keygen -lf ~/.ssh/known_hosts
 
-      - name: Prepare remote directory
+      # rsync 依赖 ssh 的非交互输出必须干净；如果 root 的 .bashrc/.profile 输出文字，
+      # 常见会直接触发 protocol mismatch / code 12。
+      - name: 检查非交互 SSH 输出是否干净
         run: |
+          set -euo pipefail
+          raw_output="$(
+            ssh \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -p "${DEPLOY_PORT:-22}" \
+              "${DEPLOY_USER}@${DEPLOY_HOST}" \
+              "printf '__DEPLOY_SSH_OK__'"
+          )"
+
+          echo "收到的原始输出："
+          printf '%s\n' "$raw_output"
+
+          if [ "$raw_output" != "__DEPLOY_SSH_OK__" ]; then
+            echo "::error::检测到非预期 SSH 输出。"
+            echo "::error::这通常说明远端 root 的 shell 初始化脚本或登录 banner 干扰了 rsync 协议。"
+            exit 1
+          fi
+
+      # 在真正打包前，先确认远端有 rsync、目录可写，并做一次最小 rsync 探针。
+      - name: 预检远端 rsync 与目录权限
+        run: |
+          set -euo pipefail
           ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "mkdir -p '${DEPLOY_PATH}'"
+            "set -e;
+             echo 'rsync_path='\"\$(command -v rsync || true)\";
+             if ! command -v rsync >/dev/null 2>&1; then
+               echo 'ERROR: 远端机器未找到 rsync，可先安装：apt-get install -y rsync';
+               exit 1;
+             fi;
+             rsync --version | head -n 2;
+             mkdir -p '${DEPLOY_PATH}';
+             ls -ld '${DEPLOY_PATH}';
+             test -w '${DEPLOY_PATH}'"
 
-      - name: Rsync timestamp probe
+      - name: 执行 rsync 时间戳探针
         run: |
+          set -euo pipefail
           echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /tmp/deploy-probe.txt
-          rsync -az \
-            -e "ssh -p ${DEPLOY_PORT:-22}" \
+          rsync -avz \
+            --itemize-changes \
+            --rsync-path="env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin rsync" \
+            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -p ${DEPLOY_PORT:-22}" \
             /tmp/deploy-probe.txt \
             "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/.deploy-probe"
 
-      - name: Setup Python
+      # rsync 预检通过后，才进入 Python 打包阶段。
+      - name: 配置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: scripts/requirements.txt
 
-      - name: Install Python dependencies
+      - name: 安装 Python 依赖
         run: pip install -r scripts/requirements.txt
 
-      - name: Build assets
+      - name: 构建图片与资源索引
         run: python scripts/build_assets.py
 
-      - name: Setup Node.js
+      - name: 配置 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
           cache-dependency-path: site/package-lock.json
 
-      - name: Install frontend dependencies
+      - name: 安装前端依赖
         run: cd site && npm ci
 
-      - name: Build Vite site
+      - name: 构建 Vite 站点
         run: cd site && npm run build
 
-      - name: Deploy dist to Nginx directory
+      - name: 发布 dist 到 Nginx 目录
         run: |
-          rsync -az --delete \
-            -e "ssh -p ${DEPLOY_PORT:-22}" \
+          set -euo pipefail
+          rsync -avz --delete \
+            --itemize-changes \
+            --rsync-path="env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin rsync" \
+            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -p ${DEPLOY_PORT:-22}" \
             dist/ \
             "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
 

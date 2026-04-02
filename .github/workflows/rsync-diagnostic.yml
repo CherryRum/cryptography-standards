@@ -1,0 +1,234 @@
+name: Rsync Diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose-rsync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEPLOY_HOST: ${{ secrets.DOC_DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DOC_DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_PATH: ${{ secrets.DOC_DEPLOY_PATH }}
+
+    steps:
+      # 拉取仓库，仅用于保留统一的 Actions 上下文与日志。
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # 安装诊断所需工具：
+      # - rsync：实际传输探针文件
+      # - netcat-openbsd：做 TCP 端口连通性检查
+      - name: 安装诊断依赖
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y rsync netcat-openbsd
+
+      # 先检查 GitHub Actions 里最关键的 secrets 是否真的注入成功。
+      - name: 校验部署配置
+        run: |
+          set -euo pipefail
+          missing=0
+
+          for name in DEPLOY_HOST DEPLOY_USER DEPLOY_PATH SSH_PRIVATE_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::缺少必需配置：${name}"
+              missing=1
+            else
+              echo "已找到配置：${name}"
+            fi
+          done
+
+          if [ -n "${DEPLOY_PORT}" ]; then
+            echo "部署端口：${DEPLOY_PORT}"
+          else
+            echo "DEPLOY_PORT 为空，将默认使用 22"
+          fi
+
+          if [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # 将私钥装入 SSH agent，后续 ssh/rsync 都复用这把钥匙。
+      - name: 配置 SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      # 确认私钥已被加载，避免“secret 有值但 agent 没装进去”的情况。
+      - name: 查看已加载的 SSH 密钥
+        run: |
+          set -euo pipefail
+          ssh-add -l
+
+      # 先做 DNS 和端口探测，区分“连不上机器”与“能连机器但 rsync 失败”。
+      - name: 检查主机解析与端口连通性
+        run: |
+          set -euo pipefail
+          echo "解析结果："
+          getent ahosts "$DEPLOY_HOST"
+          echo ""
+          echo "TCP 探测："
+          nc -vz "$DEPLOY_HOST" "${DEPLOY_PORT:-22}"
+
+      # 收集主机指纹并写入 known_hosts，避免首次连接时交互确认。
+      - name: 写入 known_hosts
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" "$DEPLOY_HOST" | tee -a ~/.ssh/known_hosts > /dev/null
+          echo "已捕获的主机指纹："
+          ssh-keygen -lf ~/.ssh/known_hosts
+
+      # rsync 通过 ssh 工作；如果远端 shell 在非交互模式下输出欢迎语、echo、banner，
+      # 就很容易出现 “protocol mismatch” 或 code 12 之类的问题。
+      - name: 检查非交互 SSH 输出是否干净
+        run: |
+          set -euo pipefail
+          raw_output="$(
+            ssh \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -p "${DEPLOY_PORT:-22}" \
+              "${DEPLOY_USER}@${DEPLOY_HOST}" \
+              "printf '__COPILOT_SSH_OK__'"
+          )"
+
+          echo "收到的原始输出："
+          printf '%s\n' "$raw_output"
+
+          if [ "$raw_output" != "__COPILOT_SSH_OK__" ]; then
+            echo "::error::检测到非预期 SSH 输出。"
+            echo "::error::这通常说明远端 root 的 .bashrc/.profile/登录 banner 在非交互 shell 下输出了内容，会直接干扰 rsync 协议。"
+            exit 1
+          fi
+
+      # 这里检查 root 是否真的能在 Actions 环境里登录，并打印关键上下文。
+      - name: 检查 SSH 登录与远端环境
+        run: |
+          set -euo pipefail
+          ssh \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -p "${DEPLOY_PORT:-22}" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "set -e; echo 'SSH 登录成功'; echo 'whoami='\"\$(whoami)\"; echo 'id='\"\$(id)\"; echo 'shell='\"\$SHELL\"; echo 'home='\"\$HOME\""
+
+      # 很多“SSH 能登，rsync 不能传”的原因，其实是远端没有 rsync，或者非交互 PATH 不包含 rsync。
+      - name: 检查远端 rsync 与目录权限
+        run: |
+          set -euo pipefail
+          ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "set -e;
+             echo 'rsync_path='\"\$(command -v rsync || true)\";
+             if ! command -v rsync >/dev/null 2>&1; then
+               echo 'ERROR: 远端机器未找到 rsync，可先安装：apt-get install -y rsync';
+               exit 1;
+             fi;
+             rsync --version | head -n 2;
+             mkdir -p '${DEPLOY_PATH}' '${DEPLOY_PATH}/.github-actions-rsync-diagnostic';
+             ls -ld '${DEPLOY_PATH}' '${DEPLOY_PATH}/.github-actions-rsync-diagnostic';
+             test -w '${DEPLOY_PATH}/.github-actions-rsync-diagnostic'"
+
+      # 真正的 rsync 探针：保留详细日志，并把退出码写入 step output，供后续中文解释。
+      - name: 执行 rsync 探针上传
+        id: rsync_probe
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          probe_file="/tmp/rsync-diagnostic-${GITHUB_RUN_ID}.txt"
+
+          {
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "ref=${GITHUB_REF}"
+            echo "sha=${GITHUB_SHA}"
+            echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "${probe_file}"
+
+          set +e
+          rsync -avz \
+            -vv \
+            --itemize-changes \
+            --rsync-path="env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin rsync" \
+            -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -p ${DEPLOY_PORT:-22}" \
+            "${probe_file}" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/.github-actions-rsync-diagnostic/" \
+            2>&1 | tee /tmp/rsync-diagnostic.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+          echo "rsync_exit_code=${status}"
+
+      # 按 rsync 退出码给出更具体的中文解释，方便直接从日志判断方向。
+      - name: 解释 rsync 结果
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          status="${{ steps.rsync_probe.outputs.exit_code }}"
+          echo "rsync 退出码：${status}"
+
+          case "${status}" in
+            0)
+              echo "rsync 传输成功。"
+              ;;
+            12)
+              echo "::error::rsync code 12：协议数据流异常。"
+              echo "::error::最常见原因是远端 root 的 .bashrc/.profile/登录 banner 在非交互 ssh 时输出了文本，或者远端 rsync 命令启动异常。"
+              ;;
+            23)
+              echo "::error::rsync code 23：部分文件无法传输。"
+              echo "::error::常见原因是目标目录权限、路径不存在、磁盘空间或文件属性问题。"
+              ;;
+            127)
+              echo "::error::rsync code 127：远端命令不存在。"
+              echo "::error::通常说明远端没有安装 rsync，或非交互 PATH 找不到 rsync。"
+              ;;
+            255)
+              echo "::error::rsync code 255：底层 SSH 失败。"
+              echo "::error::常见原因是密钥权限、PermitRootLogin、端口、防火墙或 known_hosts 问题。"
+              ;;
+            *)
+              echo "::error::rsync 失败，退出码为 ${status}。请结合上一步详细日志继续定位。"
+              ;;
+          esac
+
+      # 只有 rsync 成功时才继续验证远端文件是否真的落盘。
+      - name: 验证远端探针文件
+        if: ${{ steps.rsync_probe.outputs.exit_code == '0' }}
+        run: |
+          set -euo pipefail
+          remote_file="${DEPLOY_PATH}/.github-actions-rsync-diagnostic/rsync-diagnostic-${GITHUB_RUN_ID}.txt"
+
+          ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "test -f '${remote_file}' && echo '远端探针文件已存在：' && ls -l '${remote_file}' && echo '远端探针文件内容：' && cat '${remote_file}'"
+
+      # 清理探针文件，避免测试目录持续堆积。
+      - name: 清理远端探针文件
+        if: ${{ steps.rsync_probe.outputs.exit_code == '0' }}
+        run: |
+          set -euo pipefail
+          remote_file="${DEPLOY_PATH}/.github-actions-rsync-diagnostic/rsync-diagnostic-${GITHUB_RUN_ID}.txt"
+
+          ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "rm -f '${remote_file}' && echo '已删除远端探针文件：${remote_file}'"
+
+      # 如果 rsync 没成功，这里明确让工作流失败，避免误判为“只是告警”。
+      - name: rsync 未通过时终止工作流
+        if: ${{ steps.rsync_probe.outputs.exit_code != '0' }}
+        run: |
+          echo "::error::rsync 诊断未通过，请根据前面的中文提示继续处理。"
+          exit 1
+
+      - name: 诊断总结
+        if: ${{ success() }}
+        run: |
+          echo "结论：SSH 认证正常。"
+          echo "结论：远端目录访问正常。"
+          echo "结论：rsync 传输正常。"
+          echo "在你确认恢复自动部署前，主 deploy 仍保持仅手动触发。"
