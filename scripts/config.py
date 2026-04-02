@@ -1,5 +1,6 @@
 """构建配置常量"""
 import os
+from multiprocessing import cpu_count
 
 # 仓库根目录（脚本在 scripts/ 下，向上一级）
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -43,3 +44,6 @@ REMOTE_METADATA_NORMALIZED_PATH = os.path.join(REMOTE_METADATA_DIR, "gmbz-normse
 
 # docHash 长度（sha256 截取前 N 位）
 DOC_HASH_LENGTH = 8
+
+# 文档构建并行度：保守默认 4，避免 PDF 渲染把机器内存一次吃满
+BUILD_MAX_WORKERS = max(1, min(4, cpu_count() or 1))
